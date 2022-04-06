@@ -1,0 +1,26 @@
+Development on µWeb3 follows the pep8 rules
+
+# Development environment.
+You can setup a working development environment by issueing:
+
+```bash
+python3 setup.py develop --user
+
+# clone the uweb3scaffold project to get started
+git clone git@github.com:underdarknl/uweb3scaffold.git
+cd uweb3scaffold
+
+python3 serve.py
+```
+
+This will setup a local
+
+
+# Coding conventions:
+
+* Tabs are two spaces.
+* Each method and class is required to contain a docstring
+* Text files outside the python scope are written in markdown
+
+Each File has an __author__ variable, in which you can list your name and email address if you whish to do so.
+You can do a pull request on CONTRIBUTORS to have your name added.

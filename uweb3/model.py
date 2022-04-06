@@ -1,32 +1,26 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 """uWeb3 model base classes."""
 
 # Standard modules
-import os
+import base64
+import configparser
 import datetime
-import simplejson
+import os
 import sys
 import hashlib
-import pickle
+import json
 import secrets
-import configparser
 
-from sqlalchemy import Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base, declared_attr
-from sqlalchemy.orm import sessionmaker, reconstructor
-from sqlalchemy.orm.session import object_session
-from sqlalchemy.inspection import inspect
-from contextlib import contextmanager
 
-from itertools import chain
 
 class Error(Exception):
   """Superclass used for inheritance and external exception handling."""
 
-
 class DatabaseError(Error):
   """Superclass for errors returned by the database backend."""
 
+class CurrentlyWorking(Error):
+  """Caching error"""
 
 class BadFieldError(DatabaseError):
   """A field in the record could not be written to the database."""
@@ -34,43 +28,66 @@ class BadFieldError(DatabaseError):
 class AlreadyExistError(Error):
   """The resource already exists, and cannot be created twice."""
 
-
 class NotExistError(Error):
   """The requested or provided resource doesn't exist or isn't accessible."""
-
 
 class PermissionError(Error):
   """The entity has insufficient rights to access the resource."""
 
+
 class SettingsManager(object):
-  def __init__(self, filename=None, executing_path=None):
+  def __init__(self, filename=None, path=None):
     """Creates a ini file with the child class name
 
     Arguments:
-      % filename: str
-      Name of the file without the extension
+      % filename: str, optional
+      Name of the file, optionally without the extension will default to .ini
+      If not filename is given the class.__name__ will be used to look for the config file in the path
+      % path: str, Optional
+      Path to the config file, will be used if filename is relative, eg does not start with '/'
     """
     self.options = None
-    self.FILENAME = f"{self.__class__.__name__[:1].lower() + self.__class__.__name__[1:]}.ini"
+    extension = '' if filename and filename.endswith(('.ini', '.conf')) else '.ini'
 
     if filename:
-      self.FILENAME = f"{filename[:1].lower() + filename[1:]}.ini"
+      self.filename = f"{filename[:1].lower() + filename[1:] + extension}"
+    else:
+      self.filename = self.TableName() + extension
 
-    self.FILE_LOCATION = os.path.join(executing_path, self.FILENAME)
+    if path and not filename.startswith('/'):
+      self.file_location = os.path.join(path, self.filename)
+    else:
+      self.file_location = self.filename
     self.__CheckPermissions()
+    if not os.path.isfile(self.file_location):
+      os.mknod(self.file_location)
 
-    if not os.path.isfile(self.FILE_LOCATION):
-      os.mknod(self.FILE_LOCATION)
-
+    self.mtime = None
     self.config = configparser.ConfigParser()
     self.Read()
 
+  @classmethod
+  def TableName(cls):
+    """Returns the 'database' table name for the SettingsManager class.
+
+    If this is not explicitly defined by the class constant `_TABLE`, the return
+    value will be the class name with the first letter lowercased.
+    We stick to the same naming scheme as for more table like connectors even
+    though we use files instead of tables in this class.
+    """
+    if cls._TABLE:
+      return cls._TABLE
+    name = cls.__name__
+    return name[0].lower() + name[1:]
+
   def __CheckPermissions(self):
     """Checks if SettingsManager can read/write to file."""
-    if not os.access(self.FILE_LOCATION, os.R_OK):
-      raise PermissionError(f"SettingsManager missing permissions to read file: {self.FILE_LOCATION}")
-    if not os.access(self.FILE_LOCATION, os.W_OK):
-      raise PermissionError(f"SettingsManager missing permissions to write to file: {self.FILE_LOCATION}")
+    if not os.path.isfile(self.file_location):
+      return True
+    if not os.access(self.file_location, os.R_OK):
+      raise PermissionError(f"SettingsManager missing permissions to read file: {self.file_location}")
+    if not os.access(self.file_location, os.W_OK):
+      raise PermissionError(f"SettingsManager missing permissions to write to file: {self.file_location}")
 
   def Create(self, section, key, value):
     """Creates a section or/and key = value
@@ -92,14 +109,22 @@ class SettingsManager(object):
         raise ValueError("key already exists")
 
     self.config.set(section, key, value)
-
-    with open(self.FILE_LOCATION, 'w') as configfile:
-      self.config.write(configfile)
-    self.Read()
+    self._Write(False)
+    self.mtime = None
 
   def Read(self):
-    self.config.read(self.FILE_LOCATION)
-    self.options = self.config._sections
+    """Reads the config file and populates the options member
+    It uses the mtime to see if any re-reading is required
+
+    Returns True if changes where detected, False if no re-read was needed."""
+    if not self.mtime:
+      curtime = os.path.getmtime(self.file_location)
+      if self.mtime and self.mtime == curtime:
+        return False
+      self.config.read(self.file_location)
+      self.options = self.config._sections
+      self.mtime = curtime
+    return True
 
   def Update(self, section, key, value):
     """Updates ini file
@@ -116,12 +141,10 @@ class SettingsManager(object):
     if not self.options.get(section):
       self.config.add_section(section)
     self.config.set(section, key, value)
+    self._Write()
+    self.mtime = None
 
-    with open(self.FILE_LOCATION, 'w') as configfile:
-      self.config.write(configfile)
-    self.Read()
-
-  def Delete(self, section, key, delete_section=False):
+  def Delete(self, section, key=None):
     """Delete sections/keys from the INI file
     Be aware, deleting a section that is not empty will remove all keys from that
     given section
@@ -129,43 +152,93 @@ class SettingsManager(object):
     Arguments:
       @ section: str
         Name of the section
-      @ key: str
+      @ key: None / str
         Name of the key you want to remove
-      % delete_section: boolean
-        If set to true it will delete the supplied section
+        If set to None (default) it will delete the supplied section
     Raises:
       configparser.NoSectionError
     """
-    self.config.remove_option(section, key)
-    if delete_section:
+    if key:
+      self.config.remove_option(section, key)
+    if not key:
       self.config.remove_section(section)
-    with open(self.FILE_LOCATION, 'w') as configfile:
+    self._Write()
+    self.mtime = None
+    return True
+
+  def _Write(self, reread=True):
+    """Internal function to store the current config to file"""
+    with open(self.file_location, 'w') as configfile:
       self.config.write(configfile)
-    self.Read()
+    if reread:
+      return self.Read()
+    return True
 
 
 class SecureCookie(object):
-  def __init__(self):
-    self.req = self.secure_cookie_connection[0]
-    self.cookies = self.secure_cookie_connection[1]
-    self.cookie_salt = self.secure_cookie_connection[2]
-    self.cookiejar = self.__GetSessionCookies()
+  """The secureCookie class works just like other data abstraction classes,
+  except that it stores its data in client side cookies that are signed with a
+  server side secret to avoid tampering by the end-user.
 
-  def __GetSessionCookies(self):
-    cookiejar = {}
-    for key, value in self.cookies.items():
-      if value:
-        isValid, value = self.__ValidateCookieHash(value)
-        if isValid:
-          cookiejar[key] = value
-    return cookiejar
+  Subclass this class with your own class to create signed cookie objects. The
+  name for your class will reflect the name for the cookie in the cookie.
+  """
 
-  def Create(self, name, data, **attrs):
+  HASHTYPE = 'ripemd160'
+  _TABLE = None
+  _CONNECTOR = 'signedCookie'
+
+  def __init__(self, connection):
+    """Create a new SecureCookie instance."""
+    self.connection = connection
+    self.request, self.cookies, self.cookie_salt = self.connection
+    self.debug = self.connection.debug
+    self._rawcookie = None
+    if self.debug:
+      print('current cookies (unvalidated) for request:', self.cookies)
+
+  def __str__(self):
+    """Returns the cookie's value if it was valid and untampered with."""
+    return str(self.rawcookie)
+
+  @classmethod
+  def TableName(cls):
+    """Returns the 'database' table name for the SecureCookie class.
+
+    If this is not explicitly defined by the class constant `_TABLE`, the return
+    value will be the class name with the first letter lowercased.
+    We stick to the same naming scheme as for more table like connectors even
+    though we use cookies instead of tables in this class.
+    """
+    if cls._TABLE:
+      return cls._TABLE
+    name = cls.__name__
+    return name[0].lower() + name[1:]
+
+  @property
+  def rawcookie(self):
+    """Reads the request cookie, checks if it was signed correctly and return
+    the value, or returns False"""
+    if not self._rawcookie is None:
+      return self._rawcookie
+    name = self.TableName()
+    if name in self.cookies and self.cookies[name]:
+      isValid, value = self.__ValidateCookieHash(self.cookies[name])
+      if isValid:
+        self._rawcookie = value
+        return value
+      if self.debug:
+        print('Secure cookie "%s" was tampered with and thus invalid. content was: %s ' % (name, self.cookies[name]))
+    if self.debug:
+      print('Secure cookie "%s" was not present.' % name)
+    self._rawcookie = ''
+    return self._rawcookie
+
+  @classmethod
+  def Create(cls, connection, data, **attrs):
     """Creates a secure cookie
 
     Arguments:
-      @ name: str
-        Name of the cookie
       @ data: dict
         Needs to have a key called __name with value of how you want to name the 'table'
       % only_return_hash: boolean
@@ -199,30 +272,23 @@ class SecureCookie(object):
     Raises:
       ValueError: When cookie with name already exists
     """
-    if not attrs.get('update') and self.cookiejar.get(name):
-      raise ValueError("Cookie with name already exists")
-    if attrs.get('update'):
-      self.cookiejar[name] = data
+    cls.connection = connection
+    cls.request, cls.cookies, cls.cookie_salt = connection
+    name = cls.TableName()
+    cls._rawcookie = data
 
-    hashed = self.__CreateCookieHash(data)
-    if not attrs.get('only_return_hash'):
-      #Delete all these settings to prevent them from injecting in a cookie
-      if attrs.get('update'):
-          del attrs['update']
-      if attrs.get('only_return_hash'):
-        del attrs['only_return_hash']
-      self.req.AddCookie(name, hashed, **attrs)
-    else:
-      return hashed
+    hashed = cls.__CreateCookieHash(cls, data)
+    cls.cookies[name] = hashed
+    cls.request.AddCookie(name, hashed, **attrs)
+    return cls
 
-  def Update(self, name, data, **attrs):
+  def Update(self, data, **attrs):
     """"Updates a secure cookie
-    Keep in mind that the actual cookie is updated on the next request. After calling
-    this method it will update the session attribute to the new value however.
+    Keep in mind that the actual cookie's value is avilable from the next
+    request. After calling this method it will update the cookie attribute to
+    the new value however.
 
     Arguments:
-      @ name: str
-        Name of the cookie
       @ data: dict
         Needs to have a key called __name with value of how you want to name the 'table'
       % only_return_hash: boolean
@@ -256,32 +322,27 @@ class SecureCookie(object):
     Raises:
       ValueError: When no cookie with given name found
     """
-    if not self.cookiejar.get(name):
-      raise ValueError("No cookie with name `{}` found".format(name))
+    name = self.TableName()
+    if not self.rawcookie:
+      raise ValueError("No valid cookie with name `{}` found".format(name))
+    self._rawcookie = data
+    hashed = self.__CreateCookieHash(data)
+    self.cookies[name] = hashed
+    self.request.AddCookie(name,  hashed, **attrs)
 
-    attrs['update'] = True
-    self.Create(name, data, **attrs)
-
-
-  def Delete(self, name):
+  def Delete(self):
     """Deletes cookie based on name
     The cookie is no longer in the session after calling this method
-
-    Arguments:
-      % name: str
-        Deletes cookie by name
     """
-    self.req.DeleteCookie(name)
-    if self.cookiejar.get(name):
-      self.cookiejar.pop(name)
+    name = self.TableName()
+    self.request.DeleteCookie(name)
+    self._rawcookie = None
 
   def __CreateCookieHash(self, data):
-    hex_string = pickle.dumps(data).hex()
-
-    hashed = (hex_string + self.cookie_salt).encode('utf-8')
-    h = hashlib.new('ripemd160')
-    h.update(hashed)
-    return '{}+{}'.format(h.hexdigest(), hex_string)
+    data = str(json.dumps(data))
+    h = hashlib.new(self.HASHTYPE)
+    h.update((data + self.cookie_salt).encode('utf-8'))
+    return '{}+{}'.format(h.hexdigest(), self._encode(data))
 
   def __ValidateCookieHash(self, cookie):
     """Takes a cookie and validates it
@@ -292,15 +353,35 @@ class SecureCookie(object):
     if not cookie:
       return None
     try:
-      data = cookie.rsplit('+', 1)[1]
-      data = pickle.loads(bytes.fromhex(data))
+      data = json.loads(self._decode(cookie.rsplit('+', 1)[1]))
     except Exception:
+      print('Cookie contents could not be loaded as Json')
       return (False, None)
 
-    if cookie != self.__CreateCookieHash(data):
-      return (False, None)
+    if cookie == self.__CreateCookieHash(data):
+      return (True, data)
+    print('Cookie contents could not be verified as hash is different')
+    return (False, None)
 
-    return (True, data)
+  @staticmethod
+  def _encode(data):
+    """Encode cookie values per RFC 6265
+    http://www.ietf.org/rfc/rfc6265.txt
+
+    We elect to only encode the control chars for the cookie spec, and not the
+    whole cookie content.
+    """
+    return data.replace('%', "%25").replace('"', "%22").replace(",", "%27").replace('{', "%7B").replace('}', "%7D").replace('=', "%3D")
+
+  @staticmethod
+  def _decode(data):
+    """decode cookie values per RFC 6265
+    http://www.ietf.org/rfc/rfc6265.txt
+
+    We elect to only decode the control chars for the cookie spec, and not the
+    whole cookie content.
+    """
+    return data.replace("%22", '"').replace("%27", ",").replace("%7B", '{').replace("%7D", '}').replace("%3D", '=').replace("%25", '%')
 
 # Record classes have many methods, this is not an actual problem.
 # pylint: disable=R0904
@@ -453,7 +534,10 @@ class BaseRecord(dict):
     Typically you would verify values of the Record in this step, or transform
     the data for database-safe insertion. If the data is transformed here, this
     transformation should be reversed in `_PostCreate()`.
+
+    Returning False from this method will halt the creation of the record.
     """
+    return True
 
   def _PreSave(self, _cursor):
     """Hook that runs before saving (updating) a Record in the database.
@@ -461,7 +545,10 @@ class BaseRecord(dict):
     Typically you would verify values of the Record in this step, or transform
     the data for database-safe insertion. If the data is transformed here, this
     transformation should be reversed in `_PostSave()`.
+
+    Returning False from this method will halt the updating of the record.
     """
+    return True
 
   def _PostInit(self):
     """Hook that runs after initializing a Record instance.
@@ -484,6 +571,15 @@ class BaseRecord(dict):
 
     Any transforms that were performed on the data should be reversed here.
     """
+
+  def _PreDelete(self):
+    """Hook that runs before deleting a Record in the database.
+    Returning False from this method will halt the deletion of the record.
+    """
+    return True
+
+  def _PostDelete(self):
+    """Hook that runs after deleting a Record in the database."""
 
   # ############################################################################
   # Base record functionality methods, to be implemented by subclasses.
@@ -523,9 +619,12 @@ class BaseRecord(dict):
 
     For deleting an unloaded object, use the classmethod `DeletePrimary`.
     """
+    if not self._PreDelete():
+      return False
     self.DeletePrimary(self.connection, self.key)
     self._record.clear()
     self.clear()
+    self._PostDelete()
 
   @classmethod
   def FromPrimary(cls, connection, pkey_value):
@@ -585,33 +684,31 @@ class BaseRecord(dict):
       method = cls._LOAD_METHOD
     return getattr(cls, method)(connection, relation_value)
 
-
   # ############################################################################
   # Functions for tracking table and primary key values
   #
   def _Changes(self):
     """Returns the differences of the current state vs the last stored state."""
     sql_record = self._DataRecord()
-    changes = {}
-    for key, value in sql_record.items():
-      if self._record.get(key) != value:
-        changes[key] = value
-    return changes
+    return {
+        key: value
+        for key, value in sql_record.items() if self._record.get(key) != value
+    }
 
   def _DataRecord(self):
     """Returns a dictionary of the record's database values
     For any Record object present, its primary key value (`Record.key`) is used.
     """
-    sql_record = {}
-    for key, value in super(BaseRecord, self).items():
-      sql_record[key] = self._ValueOrPrimary(value)
-    return sql_record
+    return {key: self._ValueOrPrimary(value) for key, value in super().items()}
 
   @staticmethod
   def _ValueOrPrimary(value):
     """Returns the value, or its primary key value if it's a Record."""
     while isinstance(value, BaseRecord):
-      value = value.key
+      if hasattr(value, '_RECORD_KEY') and value._RECORD_KEY:
+        value = value[value._RECORD_KEY]
+      else:
+        value = value.key
     return value
 
   @classmethod
@@ -664,6 +761,8 @@ class BaseRecord(dict):
 class Record(BaseRecord):
   """Extensions to the Record abstraction for relational database use."""
   _FOREIGN_RELATIONS = {}
+  _CONNECTOR = 'mysql'
+  SEARCHABLE_COLUMNS = []
 
   # ############################################################################
   # Methods enabling auto-loading
@@ -772,15 +871,11 @@ class Record(BaseRecord):
 
     if foreign_cls is None:
       return value
-    elif type(foreign_cls) is dict:
+    if type(foreign_cls) is dict:
       cls = GetRecordClass(foreign_cls['class'])
       loader = foreign_cls.get('loader')
-      value = cls._LoadAsForeign(self.connection, value, method=loader)
-      return value
-    else:
-      value = GetRecordClass(foreign_cls)._LoadAsForeign(self.connection, value)
-    self[field] = value
-    return value
+      return cls._LoadAsForeign(self.connection, value, method=loader)
+    return GetRecordClass(foreign_cls)._LoadAsForeign(self.connection, value)
 
   # ############################################################################
   # Override basic dict methods so that autoload mechanisms function on them.
@@ -834,7 +929,8 @@ class Record(BaseRecord):
   #
   @classmethod
   def _FromParent(cls, parent, relation_field=None, conditions=None,
-                 limit=None, offset=None, order=None):
+                 limit=None, offset=None, order=None,
+                 yield_unlimited_total_first=False):
     """Returns all `cls` objects that are a child of the given parent.
 
     This utilized the parent's _Children method, with either this class'
@@ -844,8 +940,8 @@ class Record(BaseRecord):
       @ parent: Record
         The parent for who children should be found in this class
       % relation_field: str ~~ cls.TableName()
-        The fieldname in this class' table which relates to the parent's
-        primary key. If not given, parent.TableName() will be used.
+        The fieldname in this class' table which relates to the parent's primary
+        key. If not given, parent.TableName() will be used.
       % conditions: str / iterable ~~ None
         The extra condition(s) that should be applied when querying for records.
       % limit: int ~~ None
@@ -855,10 +951,13 @@ class Record(BaseRecord):
         Specifies the offset at which the yielded items should start. Combined
         with limit this enables proper pagination.
       % order: iterable of str/2-tuple
-        Defines the fields on which the output should be ordered. This should
-        be a list of strings or 2-tuples. The string or first item indicates
-        the field, the second argument defines descending order
+        Defines the fields on which the output should be ordered. This should be
+        a list of strings or 2-tuples. The string or first item indicates the
+        field, the second argument defines descending order
         (desc. if True).
+      % yield_unlimited_total_first: bool ~~ False
+        Instead of yielding only Record objects, the first item returned is the
+        number of results from the query if it had been executed without limit.
     """
     if not isinstance(parent, Record):
       raise TypeError('parent argument should be a Record type.')
@@ -870,12 +969,20 @@ class Record(BaseRecord):
         qry_conditions.append(conditions)
       else:
         qry_conditions.extend(conditions)
+
+    firstrow = yield_unlimited_total_first # set a flag to skip the linking of
+    # the first row to our parent, as that will be the full record cound instead
+    # of a record
     for record in cls.List(parent.connection, conditions=qry_conditions,
-                        limit=limit, offset=offset, order=order):
-      record[relation_field] = parent.copy()
+        limit=limit, offset=offset, order=order,
+        yield_unlimited_total_first=yield_unlimited_total_first):
+      if not firstrow:
+        record[relation_field] = parent.copy()
+      firstrow = False
       yield record
 
-  def _Children(self, child_class, relation_field=None, conditions=None):
+  def _Children(self, child_class, relation_field=None, conditions=None,
+    limit=None, offset=None, order=None, yield_unlimited_total_first=False):
     """Returns all `child_class` objects related to this record.
 
     The table for the given `child_class` will be queried for all fields where
@@ -887,16 +994,31 @@ class Record(BaseRecord):
       @ child_class: type (Record subclass)
         The child class whose objects should be found.
       % relation_field: str ~~ self.TableName()
-        The fieldname in the `child_class` table which relates that table to
-        the table for this record.
+        The fieldname in the `child_class` table which relates that table to the
+        table for this record.
       % conditions: str / iterable ~~
         The extra condition(s) that should be applied when querying for records.
+      % limit: int ~~ None
+        Specifies a maximum number of items to be yielded. The limit happens on
+        the database side, limiting the query results.
+      % offset: int ~~ None
+        Specifies the offset at which the yielded items should start. Combined
+        with limit this enables proper pagination.
+      % order: iterable of str/2-tuple
+        Defines the fields on which the output should be ordered. This should be
+        a list of strings or 2-tuples. The string or first item indicates the
+        field, the second argument defines descending order (desc. if True).
+      % yield_unlimited_total_first: bool ~~ False
+        Instead of yielding only Record objects, the first item returned is the
+        number of results from the query if it had been executed without limit.
     """
     # Delegating to let child class handle its own querying. These are methods
     # for development, and are private only to prevent name collisions.
     # pylint: disable=W0212
     return child_class._FromParent(
-        self, relation_field=relation_field, conditions=conditions)
+        self, relation_field=relation_field, conditions=conditions,
+        limit=limit, offset=offset, order=order,
+        yield_unlimited_total_first=yield_unlimited_total_first)
 
   def _DeleteChildren(self, child_class, relation_field=None):
     """Deletes all `child_class` objects related to this record.
@@ -908,8 +1030,8 @@ class Record(BaseRecord):
       @ child_class: type (Record subclass)
         The child class whose objects should be deleted.
       % relation_field: str ~~ self.TableName()
-        The fieldname in the `child_class` table which relates that table to
-        the table for this record.
+        The fieldname in the `child_class` table which relates that table to the
+        table for this record.
     """
     relation_field = relation_field or self.TableName()
     with self.connection as cursor:
@@ -919,7 +1041,7 @@ class Record(BaseRecord):
 
   @classmethod
   def _PrimaryKeyCondition(cls, connection, value):
-    """Returns the MySQL primary key condition to be used."""
+    """Returns the primary key condition to be used."""
     if isinstance(cls._PRIMARY_KEY, tuple):
       if not isinstance(value, tuple):
         raise TypeError(
@@ -929,9 +1051,10 @@ class Record(BaseRecord):
       values = tuple(map(cls._ValueOrPrimary, value))
       return ' AND '.join('`%s` = %s' % (field, value) for field, value
                    in zip(cls._PRIMARY_KEY, connection.EscapeValues(values)))
-    else:
-      return '`%s` = %s' % (cls._PRIMARY_KEY,
-                            connection.EscapeValues(cls._ValueOrPrimary(value)))
+    return '`%s`.`%s` = %s' % (
+        cls.TableName(),
+        cls._PRIMARY_KEY,
+        connection.EscapeValues(cls._ValueOrPrimary(value)))
 
   def _RecordCreate(self, cursor):
     """Inserts the record's current values in the database as a new record.
@@ -939,8 +1062,8 @@ class Record(BaseRecord):
     Upon success, the record's primary key is set to the result's insertid
     """
     try:
-      # Compound key case
       values = self._DataRecord()
+      # Compound key case
       if isinstance(self._PRIMARY_KEY, tuple):
         auto_inc_field = set(self._PRIMARY_KEY) - set(values)
         if auto_inc_field:
@@ -954,13 +1077,13 @@ class Record(BaseRecord):
     except cursor.OperationalError as err_obj:
       if err_obj[0] == 1054:
         raise BadFieldError(err_obj[1])
-      raise
+      raise DatabaseError(err_obj)
 
   def _RecordUpdate(self, cursor):
     """Updates the existing database entry with the record's current values.
 
-    The constraint with which the record is updated is the name and value of
-    the Record's primary key (`self._PRIMARY_KEY` and `self.key` resp.)
+    The constraint with which the record is updated is the name and value of the
+    Record's primary key (`self._PRIMARY_KEY` and `self.key` resp.)
     """
     try:
       if isinstance(self._PRIMARY_KEY, tuple):
@@ -968,13 +1091,15 @@ class Record(BaseRecord):
       else:
         primary = self._record[self._PRIMARY_KEY]
       cursor.Update(
-          table=self.TableName(), values=self._Changes(),
+          table=self.TableName(),
+          values=self._Changes(),
           conditions=self._PrimaryKeyCondition(self.connection, primary))
     except KeyError:
       raise Error('Cannot update record without pre-existing primary key.')
     except cursor.OperationalError as err_obj:
       if err_obj[0] == 1054:
         raise BadFieldError(err_obj[1])
+      raise DatabaseError(err_obj)
 
   def _SaveForeign(self, cursor):
     """Recursively saves all nested Record instances."""
@@ -990,8 +1115,8 @@ class Record(BaseRecord):
   def _SaveSelf(self, cursor):
     """Updates the existing database entry with the record's current values.
 
-    The constraint with which the record is updated is the name and value of
-    the Record's primary key (`self._PRIMARY_KEY` and `self.key` resp.)
+    The constraint with which the record is updated is the name and value of the
+    Record's primary key (`self._PRIMARY_KEY` and `self.key` resp.)
     """
     self._PreSave(cursor)
     difference = self._Changes()
@@ -1033,7 +1158,8 @@ class Record(BaseRecord):
 
   @classmethod
   def List(cls, connection, conditions=None, limit=None, offset=None,
-           order=None, yield_unlimited_total_first=False):
+           order=None, yield_unlimited_total_first=False, search=None,
+           tables=None, escape=True, fields=None, distinct=False):
     """Yields a Record object for every table entry.
 
     Arguments:
@@ -1049,24 +1175,64 @@ class Record(BaseRecord):
         Specifies the offset at which the yielded items should start. Combined
         with limit this enables proper pagination.
       % order: iterable of str/2-tuple
-        Defines the fields on which the output should be ordered. This should
-        be a list of strings or 2-tuples. The string or first item indicates the
+        Defines the fields on which the output should be ordered. This should be
+        a list of strings or 2-tuples. The string or first item indicates the
         field, the second argument defines descending order (desc. if True).
       % yield_unlimited_total_first: bool ~~ False
         Instead of yielding only Record objects, the first item returned is the
         number of results from the query if it had been executed without limit.
+      % search: str
+        Specifies what string should be searched for in the default searchable
+        database columns.
+      % tables: str / iterable ~~ None
+        Specifies what tables should be searched queried
+      % escape: bool ~~ True
+        Are conditions escaped?
+      % fields: str / iterable ~~ *
+        Specifies what fields should be returned
+      % distinct: bool (optional).
+        Performs a DISTINCT query if set to True.
 
     Yields:
       Record: Database record abstraction class.
     """
+    if not tables:
+      tables = [cls.TableName()]
+    group = None
+    if fields is None:
+      fields = '%s.*' % cls.TableName()
+    if search:
+      group = '%s.%s' % (cls.TableName(), (cls.RecordKey() if getattr(cls, "RecordKey", None) else cls._PRIMARY_KEY))
+      tables, searchconditions = cls._GetSearchQuery(connection, tables, search)
+      if conditions:
+        if type(conditions) == list:
+          conditions.extend(searchconditions)
+        else:
+          searchconditions.append(conditions)
+          conditions = searchconditions
+      else:
+        conditions = searchconditions
+    cacheable = False
+    if not offset or offset < 0:
+      offset = 0
+    if hasattr(cls, '_addToCache'):
+      #TODO dont cache partial / multi-table objects
+      cacheable = True
+      connection.modelcache['_stats']['queries'].append('%s Record.List' % cls.TableName())
     with connection as cursor:
-      records = cursor.Select(
-          table=cls.TableName(), conditions=conditions, limit=limit,
-          offset=offset, order=order, totalcount=yield_unlimited_total_first)
+      records = cursor.Select(fields=fields,
+                              table=tables, conditions=conditions,
+                              limit=limit, offset=offset, order=order,
+                              totalcount=yield_unlimited_total_first,
+                              escape=escape, group=group, distinct=distinct)
     if yield_unlimited_total_first:
       yield records.affected
-    for record in records:
-      yield cls(connection, record)
+    records = [cls(connection, record) for record in list(records)]
+
+    yield from records
+
+    if cacheable:
+      list(cls._cacheListPreseed(records))
 
   # SQL Records have foreign relations, saving needs an extra argument for this.
   # pylint: disable=W0221
@@ -1089,6 +1255,64 @@ class Record(BaseRecord):
       self._SaveSelf(cursor)
     return self
   # pylint: enable=W0221
+
+  @classmethod
+  def _GetSearchQuery(cls, connection, tables, search):
+    """Extracts table information from the searchable columns list."""
+    conditions = []
+    like = 'like "%%%s%%"' % connection.EscapeValues(search.strip())[1:-1]
+    searchconditions = []
+    thistable = cls.TableName()
+    for column in cls.SEARCHABLE_COLUMNS:
+      if '.' not in column:
+        searchconditions.append('`%s`.`%s` %s' % (thistable, column, like))
+        continue
+      classname, column = column.split('.', 1)
+      othertable = cls._SUBTYPES[classname].TableName()
+      if (othertable != thistable and
+          othertable not in tables):
+        fkey = cls._FOREIGN_RELATIONS.get(classname, False)
+        key = othertable._PRIMARY_KEY
+        if fkey and fkey.get('LookupKey', False):
+          key = fkey.get('LookupKey')
+        elif getattr(table, "RecordKey", None):
+          key = othertable.RecordKey()
+        # add the cross table join
+        #TODO use referenced field, instead of just the othertable name
+        conditions.append('`%s`.`%s` = `%s`.`%s' % (thistable,
+            othertable,
+            othertable,
+            key))
+        tables.append(othertable)
+      searchconditions.append('`%s`.`%s` %s' % (othertable,
+          column, like))
+
+    conditions.append('(%s)' % ' or '.join(searchconditions))
+    return tables, conditions
+
+  def __json__(self, complete=True, recursive=True):
+    """Returns a dictionary representation of the Record.
+
+    Arguments:
+      % complete: bool ~~ False
+        Whether the foreign references on the object should all be resolved before
+        converting the Record to a dictionary. Either way, existing resolved
+        references will be represented as complete dictionaries.
+
+      Returns:
+        dict: dictionary representation of the record.
+      """
+    record_dict = {}
+    record = self if complete else dict(record)
+    for key, value in record.items():
+      if isinstance(value, BaseRecord):
+        if complete and recursive:
+          record_dict[key] = value.__json__(complete=True, recursive=True)
+        else:
+          record_dict[key] = dict(value)
+      else:
+        record_dict[key] = value
+    return record_dict
 
 
 class VersionedRecord(Record):
@@ -1144,33 +1368,104 @@ class VersionedRecord(Record):
     return cls(connection, record[0])
 
   @classmethod
-  def List(cls, connection, conditions=None):
+  def List(cls, connection, conditions=None, limit=None, offset=None,
+           order=None, yield_unlimited_total_first=False, search=None,
+           tables=None, escape=True, fields=None):
     """Yields the latest Record for each versioned entry in the table.
 
     Arguments:
-      @ connection: sqltalk.connection
+      @ connection: object
         Database connection to use.
+      % conditions: str / iterable ~~ None
+        Optional query portion that will be used to limit the list of results.
+        If multiple conditions are provided, they are joined on an 'AND' string.
+      % limit: int ~~ None
+        Specifies a maximum number of items to be yielded. The limit happens on
+        the database side, limiting the query results.
+      % offset: int ~~ None
+        Specifies the offset at which the yielded items should start. Combined
+        with limit this enables proper pagination.
+      % order: iterable of str/2-tuple
+        Defines the fields on which the output should be ordered. This should
+        be a list of strings or 2-tuples. The string or first item indicates the
+        field, the second argument defines descending order (desc. if True).
+      % yield_unlimited_total_first: bool ~~ False
+        Instead of yielding only Record objects, the first item returned is the
+        number of results from the query if it had been executed without limit.
+      % search: str
+        Specifies what string should be searched for in the default searchable
+        database columns.
+      % tables: str / iterable ~~ None
+        Specifies what tables should be searched queried
+      % escape: bool ~~ True
+        Are conditions escaped?
+      % fields: str / iterable ~~ *
+        Specifies what fields should be returned
 
     Yields:
       Record: The Record with the newest version for each versioned entry.
     """
-    if isinstance(conditions, (list, tuple)):
-      conditions = ' AND '.join(conditions)
+    if not tables:
+      tables = [cls.TableName()]
+    if fields:
+      if fields != '*':
+        if isinstance(fields, str):
+          fields = connection.EscapeField(fields)
+        else:
+          fields = ', '.join(connection.EscapeField(fields))
+    else:
+      fields = "%s.*" % cls.TableName()
+    if search:
+      search = search.strip()
+      tables, searchconditions = cls._GetSearchQuery(connection, tables, search)
+      if conditions:
+        if type(conditions) == list:
+          conditions.extend(searchconditions)
+        else:
+          searchconditions.append(conditions)
+          conditions = searchconditions
+      else:
+        conditions = searchconditions
+    field_escape = connection.EscapeField if escape else lambda x: x
+    if yield_unlimited_total_first and limit is not None:
+      totalcount = 'SQL_CALC_FOUND_ROWS'
+    else:
+      totalcount = ''
+    cacheable = False
+    if hasattr(cls, '_addToCache'):
+      #TODO dont cache partial / multi-table objects
+      cacheable = True
+      connection.modelcache['_stats']['queries'].append('%s VersionedRecord.List' % cls.TableName())
     with connection as cursor:
       records = cursor.Execute("""
-          SELECT `%(table)s`.*
-          FROM `%(table)s`
+          SELECT %(totalcount)s %(fields)s
+          FROM %(tables)s
           JOIN (SELECT MAX(`%(primary)s`) AS `max`
                 FROM `%(table)s`
                 GROUP BY `%(record_key)s`) AS `versions`
               ON (`%(table)s`.`%(primary)s` = `versions`.`max`)
           WHERE %(conditions)s
-          """ % {'primary': cls._PRIMARY_KEY,
+          %(order)s
+          %(limit)s
+          """ % {'totalcount': totalcount,
+                 'primary': cls._PRIMARY_KEY,
                  'record_key': cls.RecordKey(),
+                 'fields': fields,
                  'table': cls.TableName(),
-                 'conditions': conditions or '1'})
-    for record in records:
-      yield cls(connection, record)
+                 'tables': cursor._StringTable(tables, field_escape),
+                 'conditions': cursor._StringConditions(conditions,
+                                                      field_escape),
+                 'order': cursor._StringOrder(order, field_escape),
+                 'limit': cursor._StringLimit(limit, offset)})
+    if yield_unlimited_total_first and limit is not None:
+      with connection as cursor:
+        records.affected = cursor._Execute('SELECT FOUND_ROWS()')[0][0]
+      yield records.affected
+    # turn sqltalk rows into model
+    records = [cls(connection, record) for record in list(records)]
+    yield from records
+    if cacheable:
+      list(cls._cacheListPreseed(records))
 
   @classmethod
   def Versions(cls, connection, identifier, conditions='1'):
@@ -1227,11 +1522,15 @@ class VersionedRecord(Record):
     assume an AutoIncrement primary key field.
     """
     super(VersionedRecord, self)._PreSave(cursor)
-    self.key = None
+    difference = self._Changes()
+    if difference:
+      self.key = None
 
   def _RecordUpdate(self, cursor):
     """All updates are handled as new inserts for the same Record Key."""
-    self._RecordCreate(cursor)
+    difference = self._Changes()
+    if difference:
+      self._RecordCreate(cursor)
 
   # Pylint falsely believes this property is overwritten by its setter later on.
   # pylint: disable=E0202
@@ -1257,6 +1556,7 @@ class VersionedRecord(Record):
 class MongoRecord(BaseRecord):
   """Abstraction of MongoDB collection records."""
   _PRIMARY_KEY = '_id'
+  _CONNECTOR = 'mongo'
 
   @classmethod
   def Collection(cls, connection):
@@ -1310,423 +1610,6 @@ class MongoRecord(BaseRecord):
     self.key = self.Collection(self.connection).save(self._DataRecord())
 
 
-class AlchemyBaseRecord(object):
-  def __init__(self, session, record):
-    self.session = session
-    self._BuildClassFromRecord(record)
-
-  def _BuildClassFromRecord(self, record):
-    if isinstance(record, dict):
-      for key, value in record.items():
-        if not key in self.__table__.columns.keys():
-          raise AttributeError(f"Key '{key}' not specified in class '{self.__class__.__name__}'")
-        setattr(self, key, value)
-      if self.session:
-        try:
-          self.session.add(self)
-        except:
-          self.session.rollback()
-          raise
-        else:
-          self.session.commit()
-
-  def __hash__(self):
-    """Returns the hashed value of the key."""
-    return hash(self.key)
-
-  def __del__(self):
-    """Cleans up the connection at the end of its life cycle"""
-    self.session.close()
-
-  def __repr__(self):
-    s = {}
-    for key in self.__table__.columns.keys():
-      value = getattr(self, key)
-      if value:
-        s[key] = value
-    return f'{type(self).__name__}({s})'
-
-  def __eq__(self, other):
-    if type(self) != type(other):
-      return False  # Types must be the same.
-    elif not (self.key == other.key is not None):
-      return False  # Records should have the same non-None primary key value.
-    elif len(self) != len(other):
-      return False  # Records must contain the same number of objects.
-    for key in self.__table__.columns.keys():
-      value = getattr(self, key)
-      other_value = getattr(other, key)
-      if isinstance(self, AlchemyBaseRecord) != isinstance(other, AlchemyBaseRecord):
-        # Only one of the two is a BaseRecord instance
-        if (isinstance(self, AlchemyBaseRecord) and value.key != other_value or
-            isinstance(other, AlchemyBaseRecord) and other_value.key != value):
-          return False
-      elif value != other_value:
-        return False
-    return True
-
-  def __ne__(self, other):
-    """Returns the proper inverse of __eq__."""
-    # Without this, the non-equal checks used in __eq__ will not work,
-    # and the  `!=` operator would not be the logical inverse of `==`.
-    return not self == other
-
-  def __len__(self):
-    return len(dict((col, getattr(self, col)) for col in self.__table__.columns.keys() if getattr(self, col)))
-
-  def __int__(self):
-    """Returns the integer key value of the Record.
-
-    For record objects where the primary key value is not (always) an integer,
-    this function will raise an error in the situations where it is not.
-    """
-    key_val = self.key
-    if not isinstance(key_val, (int)):
-      # We should not truncate floating point numbers.
-      # Nor turn strings of numbers into an integer.
-      raise ValueError('The primary key is not an integral number.')
-    return key_val
-
-  def copy(self):
-    """Returns a shallow copy of the Record that is a new functional Record."""
-    import copy
-    return copy.copy(self)
-
-  def deepcopy(self):
-    import copy
-    return copy.deepcopy(self)
-
-  def __gt__(self, other):
-    """Index of this record is greater than the other record's.
-
-    This requires both records to be of the same record class.
-    """
-    if type(self) == type(other):
-      return self.key > other.key
-    return NotImplemented
-
-  def __ge__(self, other):
-    """Index of this record is greater than, or equal to, the other record's.
-
-    This requires both records to be of the same record class.
-    """
-    if type(self) == type(other):
-      return self.key >= other.key
-    return NotImplemented
-
-  def __lt__(self, other):
-    """Index of this record is smaller than the other record's.
-
-    This requires both records to be of the same record class.
-    """
-    if type(self) == type(other):
-      return self.key < other.key
-    return NotImplemented
-
-  def __le__(self, other):
-    """Index of this record is smaller than, or equal to, the other record's.
-
-    This requires both records to be of the same record class.
-    """
-    if type(self) == type(other):
-      return self.key <= other.key
-    return NotImplemented
-
-  def __getitem__(self, field):
-    return getattr(self, field)
-
-  def iteritems(self):
-    """Yields all field+value pairs in the Record.
-
-    This automatically loads in relationships.
-    """
-    return chain(((key, getattr(self, key)) for key in self.__table__.columns.keys()),
-    ((child[0], getattr(self, child[0])) for child in inspect(type(self)).relationships.items()))
-
-  def itervalues(self):
-    """Yields all values in the Record, loads relationships"""
-    return chain((getattr(self, key) for key in self.__table__.columns.keys()),
-                 (getattr(self, child[0]) for child in inspect(type(self)).relationships.items()))
-
-  def items(self):
-    """Returns a list of field+value pairs in the Record.
-
-    This automatically loads in relationships.
-    """
-    return list(self.iteritems())
-
-  def values(self):
-    """Returns a list of values in the Record, loading foreign references."""
-    return list(self.itervalues())
-
-  @property
-  def key(self):
-    return getattr(self, inspect(type(self)).primary_key[0].name)
-
-  @classmethod
-  def TableName(cls):
-    """Returns the database table name for the Record class."""
-    return cls.__tablename__
-
-  @classmethod
-  def _AlchemyRecordToDict(cls, record):
-    """Turns the values of a given class into a dictionary. Doesn't trigger
-    automatic loading of child classes.
-
-    Arguments:
-      @ record: cls
-        AlchemyBaseRecord class that is retrieved from a database query
-    Returns
-      dict: dictionary with all table columns and values
-      None: when record is empty
-    """
-    if not isinstance(record, type(None)):
-      return dict((col, getattr(record, col)) for col in record.__table__.columns.keys())
-    return None
-
-  @reconstructor
-  def reconstruct(self):
-    """This is called instead of __init__ when the result comes from the database"""
-    self.session = object_session(self)
-
-  @classmethod
-  def _PrimaryKeyCondition(cls, target):
-    """Returns the name of the primary key of given class
-
-    Arguments:
-      @ target: cls
-        Class that you want to know the primary key name from
-    """
-    return getattr(cls, inspect(cls).primary_key[0].name)
-
-class AlchemyRecord(AlchemyBaseRecord):
-  """ """
-  @classmethod
-  def FromPrimary(cls, session, p_key):
-    """Finds record based on given class and supplied primary key.
-
-    Arguments:
-      @ session: sqlalchemy session object
-        Available in the pagemaker with self.session
-      @ p_key: integer
-        primary_key of the object to delete
-    Returns
-      cls
-      None
-    """
-    try:
-      record = session.query(cls).filter(cls._PrimaryKeyCondition(cls) == p_key).first()
-    except:
-      session.rollback()
-      raise
-    else:
-      if not record:
-        raise NotExistError(f"Record with primary key {p_key} does not exist")
-      return record
-
-  @classmethod
-  def DeletePrimary(cls, session, p_key):
-    """Deletes record base on primary key from given class.
-
-    Arguments:
-      @ session: sqlalchemy session object
-        Available in the pagemaker with self.session
-      @ p_key: integer
-        primary_key of the object to delete
-
-    Returns:
-      isdeleted: boolean
-    """
-    try:
-      isdeleted = session.query(cls).filter(cls._PrimaryKeyCondition(cls) == p_key).delete()
-    except:
-      session.rollback()
-      raise
-    else:
-      session.commit()
-      return isdeleted
-
-  @classmethod
-  def Create(cls, session, record):
-    """Creates a new instance and commits it to the database
-
-    Arguments:
-      @ session: sqlalchemy session object
-        Available in the pagemaker with self.session
-      @ record: dict
-        Dictionary with all key:value pairs that are required for the db record
-    Returns:
-      cls
-    """
-    return cls(session, record)
-
-  @classmethod
-  def List(cls, session, conditions=None, limit=None, offset=None,
-           order=None, yield_unlimited_total_first=False):
-    """Yields a Record object for every table entry.
-
-    Arguments:
-      @ session: sqlalchemy session object
-        Available in the pagemaker with self.session
-      % conditions: list
-        Optional query portion that will be used to limit the list of results.
-        If multiple conditions are provided, they are joined on an 'AND' string.
-        For example: conditions=[User.id <= 10, User.id >=]
-      % limit: int ~~ None
-        Specifies a maximum number of items to be yielded. The limit happens on
-        the database side, limiting the query results.
-      % offset: int ~~ None
-        Specifies the offset at which the yielded items should start. Combined
-        with limit this enables proper pagination.
-      % order: tuple of operants
-        For example the User class has 3 fields; id, username, password. We can pass
-        the field we want to order on to the tuple like so;
-        (User.id.asc(), User.username.desc())
-      % yield_unlimited_total_first: bool ~~ False
-        Instead of yielding only Record objects, the first item returned is the
-        number of results from the query if it had been executed without limit.
-
-    Returns:
-      integer: integer with length of results.
-      list: List of classes from request type
-    """
-    try:
-      query = session.query(cls)
-      if conditions:
-        for condition in conditions:
-          query = query.filter(condition)
-      if order:
-        for item in order:
-          query = query.order_by(item)
-      if limit:
-        query = query.limit(limit)
-      if offset:
-        query = query.offset(offset)
-      result = query.all()
-    except:
-      session.rollback()
-      raise
-    else:
-      if yield_unlimited_total_first:
-        return len(result)
-      return result
-
-  @classmethod
-  def Update(cls, session, conditions, values):
-    """Update table based on conditions.
-
-    Arguments:
-      @ session: sqlalchemy session object
-          Available in the pagemaker with self.session
-      @ conditions: list|tuple
-        for example: [User.id > 2, User.id < 100]
-      @ values: dict
-        for example: {User.username: 'value'}
-    """
-    try:
-      query = session.query(cls)
-      for condition in conditions:
-        query = query.filter(condition)
-      query = query.update(values)
-    except:
-      session.rollback()
-      raise
-    else:
-      session.commit()
-
-  def Delete(self):
-    """Delete current instance from the database"""
-    try:
-      isdeleted = self.session.query(type(self)).filter(self._PrimaryKeyCondition(self) == self.key).delete()
-    except:
-      self.session.rollback()
-      raise
-    else:
-      self.session.commit()
-      return isdeleted
-
-  def Save(self):
-    """Saves any changes made in the current record. Sqlalchemy automatically detects
-    these changes and only updates the changed values. If no values are present
-    no query will be commited."""
-    self.session.commit()
-
-class Smorgasbord(object):
-  """A connection tracker for uWeb3 Record classes.
-
-  The idea is that you can set up a Smorgasbord with various different
-  connection types (Mongo and relational), and have the smorgasbord provide the
-  correct connection for the caller's needs. MongoReceord would be given the
-  MongoDB connection as expected, and all other users will be given a relational
-  database connection.
-
-  This is highly beta and debugging is going to be at the very least interesting
-  because of __getattribute__ overriding that is necessary for this type of
-  behavior.
-  """
-  CONNECTION_TYPES = 'mongo', 'relational'
-
-  def __init__(self, connections=None):
-    self.connections = {} if connections is None else connections
-
-  def AddConnection(self, connection, con_type):
-    """Adds a connection and its type to the Smorgasbord.
-
-    The connection type should be one of the strings defined in the class
-    constant `CONNECTION_TYPES`.
-    """
-    if con_type not in self.CONNECTION_TYPES:
-      raise ValueError('Unknown connection type %r' % con_type)
-    self.connections[con_type] = connection
-
-  def RelevantConnection(self):
-    """Returns the relevant database connection dependant on the caller model.
-
-    If the caller model cannot be determined, the 'relational' database
-    connection is returned as a fallback method.
-    """
-    # Figure out caller type or instance
-    # pylint: disable=W0212
-    caller_locals = sys._getframe(2).f_locals
-    # pylint: enable=W0212
-    if 'self' in caller_locals:
-      caller_cls = type(caller_locals['self'])
-    else:
-      caller_cls = caller_locals.get('cls', type)
-    # Decide the type of connection to return for this caller
-    if issubclass(caller_cls, MongoRecord):
-      con_type = 'mongo'
-    else:
-      con_type = 'relational' # This is the default connection to return.
-    try:
-      return self.connections[con_type]
-    except KeyError:
-      raise TypeError('There is no connection for type %r' % con_type)
-
-  def __enter__(self):
-    """Proxies the transaction to the underlying relevant connection.
-
-    This is not quite as transparent a passthrough as using __getattribute__,
-    but it necessary due to performance optimizations done in Python2.7
-    """
-    return self.RelevantConnection().__enter__()
-
-  def __exit__(self, *args):
-    """Proxies the transaction to the underlying relevant connection.
-
-    This is not quite as transparent a passthrough as using __getattribute__,
-    but it necessary due to performance optimizations done in Python2.7
-    """
-    return self.RelevantConnection().__exit__(*args)
-
-  def __getattribute__(self, attribute):
-    try:
-      # Pray to God we haven't overloaded anything from our connection classes.
-      return super(Smorgasbord, self).__getattribute__(attribute)
-    except AttributeError:
-      return getattr(self.RelevantConnection(), attribute)
-
-
 def RecordTableNames():
   """Yields Record subclasses that have been defined outside this module.
 
@@ -1745,8 +1628,7 @@ def RecordTableNames():
       if sub not in seen:
         seen.add(sub)
         yield sub
-        for sub in GetSubTypes(sub, seen):
-          yield sub
+        yield from GetSubTypes(sub, seen)
 
   for cls in GetSubTypes(BaseRecord):
     # Do not yield subclasses defined in this module
@@ -1754,59 +1636,59 @@ def RecordTableNames():
       yield cls.TableName(), cls
 
 
-def RecordToDict(record, complete=False, recursive=False):
-  """Returns a dictionary representation of the Record.
+import functools
 
-  Arguments:
-    @ record: Record
-      A record object that should be turned to a dictionary
-    % complete: bool ~~ False
-      Whether the foreign references on the object should all be resolved before
-      converting the Record to a dictionary. Either way, existing resolved
-      references will be represented as complete dictionaries.
-    % recursive: bool ~~ False
-      When this and `complete` are set True, foreign references will recursively
-      be resolved, resulting in the entire tree to be expanded before it is
-      converted to a dictionary.
+class CachedPage(object):
+  """Abstraction class for the cached Pages table in the database."""
 
-    Returns:
-      dict: dictionary representation of the record.
+  MAXAGE = 61
+
+  @classmethod
+  def Clean(cls, connection, maxage=None):
+    """Deletes all cached pages that are older than MAXAGE.
+
+    An optional 'maxage' integer can be specified instead of MAXAGE.
     """
-  record_dict = {}
-  record = record if complete else dict(record)
-  for key, value in record.items():
-    if isinstance(value, Record):
-      if complete and recursive:
-        record_dict[key] = RecordToDict(value, complete=True, recursive=True)
-      else:
-        record_dict[key] = dict(value)
+    with connection as cursor:
+      cursor.Execute("""delete
+        from
+          %s
+        where
+          TIME_TO_SEC(TIMEDIFF(UTC_TIMESTAMP(), created)) > %d
+          """ % (
+          cls.TableName(),
+          (cls.MAXAGE if maxage is None else maxage)
+        ))
+
+  @classmethod
+  def FromSignature(cls, connection, maxage, name, modulename, args, kwargs):
+    """Returns a cached page from the given signature."""
+    with connection as cursor:
+      cache = cursor.Execute("""select
+          data,
+          TIME_TO_SEC(TIMEDIFF(UTC_TIMESTAMP(), created)) as age,
+          creating
+        from
+          %s
+        where
+          TIME_TO_SEC(TIMEDIFF(UTC_TIMESTAMP(), created)) < %d AND
+          name = %s AND
+          modulename = %s AND
+          args = %s AND
+          kwargs = %s
+          order by created desc
+          limit 1
+          """ % (
+        cls.TableName(),
+        (cls.MAXAGE if maxage is None else maxage),
+        connection.EscapeValues(name),
+        connection.EscapeValues(modulename),
+        connection.EscapeValues(args),
+        connection.EscapeValues(kwargs)))
+
+    if cache:
+      if cache[0]['creating'] is not None:
+        raise CurrentlyWorking(cache[0]['age'])
+      return cls(connection, cache[0])
     else:
-      record_dict[key] = value
-  return record_dict
-
-
-def MakeJson(record, complete=False, recursive=False, indent=None):
-  """Returns a JSON object string of the given `record`.
-
-  The record may be a regular Python dictionary, in which case it will be
-  converted to JSON, with a few additional conversions for date and time types.
-
-  If the record is a Record subclass, it is first passed through the
-  RecordToDict() function. The arguments `complete` and `recursive` function
-  similarly to the arguments on that function.
-
-  Returns:
-    str: JSON representation of the given record dictionary.
-  """
-  def _Encode(obj):
-    if isinstance(obj, datetime.datetime):
-      return obj.strftime('%F %T')
-    if isinstance(obj, datetime.date):
-      return obj.strftime('%F')
-    if isinstance(obj, datetime.time):
-      return obj.strftime('%T')
-
-  if isinstance(record, BaseRecord):
-    record = RecordToDict(record, complete=complete, recursive=recursive)
-  return simplejson.dumps(
-      record, default=_Encode, sort_keys=True, indent=indent)
+      raise cls.NotExistError('No cached data found')

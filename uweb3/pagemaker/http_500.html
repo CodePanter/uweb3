@@ -1,93 +1,94 @@
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<!DOCTYPE html>
+<html lang="en">
   <head>
-    <title>Well, that's embarrassing</title>
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Well, that's embarrassing µWeb3 500 Error.</title>
+    <meta charset="UTF-8">
     <style type="text/css">
-    html{
-      font:1em/1.2em monospace;
-    }
-    h2{
-      margin:1.5em 0 .5em;
-      line-height:.7em;
-    }
-    ol + h2 {
-      margin-top: 0;
-    }
-    p{
-      margin:0.5em;
-    }
-    .traceback{
-      margin:0;
-      padding:.3em 0 .3em 2em;
-      list-style:none;
-      counter-reset:item;
-    }
-    .traceback>li:before{
-      font:bold italic 2em serif;
-      content:counter(item);
-      counter-increment:item;
-      float:left;
-      margin:0 0 0 -.7em;
-    }
-    .frame{
-      background:#ddc;
-      border:1px solid #ccc;
-      margin:0 0 2em 1em;
-      padding:.5em .8em;
-      list-style:none;
-    }
-    .frame table{
-      margin:.8em 0 .4em;
-    }
-    .source tbody td{
-      white-space:pre;
-      padding: 0 .6em;
-    }
-    .source tbody td:first-child{
-      border-right:1px solid #888;
-    }
-    .source tr:nth-child(4){
-      color:#c00;
-      font-weight:bold;
-    }
-    .source td+td:before{
-      content:none;
-    }
-    table{
-      background:#eed;
-      border-collapse:collapse;
-      border:1px solid #888;
-      margin:1em;
-    }
-    table thead td{
-      background:#888;
-      color:#fff;
-      padding:.1em 1.5em;
-    }
-    table td:first-child{
-      font-weight:bold;
-      vertical-align:top;
-    }
-    table td+td:before{
-      content:"= ";
-    }
-    table td{
-      padding:0 0 0 .6em;
-    }
-    table td+td{
-      width:100%;
-    }
-    table tr:nth-child(2n){
-      background:#e4e4c4;
-    }
-    table tbody tr:hover td{
-      background:#ffb;
-      background:rgba(255,255,0,.3)
-    }
+      html{
+        font: 1em/1.2em monospace;
+      }
+      h2{
+        margin: 1.5em 0 .5em;
+        line-height:.7em;
+      }
+      ol + h2 {
+        margin-top: 0;
+      }
+      p{
+        margin: 0.5em;
+      }
+      .traceback{
+        margin: 0;
+        padding: .3em 0 .3em 2em;
+        list-style: none;
+        counter-reset: item;
+      }
+      .traceback>li:before{
+        font: bold italic 2em serif;
+        content: counter(item);
+        counter-increment: item;
+        float: left;
+        margin: 0 0 0 -.7em;
+      }
+      .frame{
+        background: #ddc;
+        border: 1px solid #ccc;
+        margin: 0 0 2em 1em;
+        padding: .5em .8em;
+        list-style: none;
+      }
+      .frame table{
+        margin: .8em 0 .4em;
+      }
+      .source tbody td{
+        white-space: pre;
+        padding: 0 .6em;
+      }
+      .source tbody td:first-child{
+        border-right: 1px solid #888;
+      }
+      .source tr:nth-child(4){
+        color: #c00;
+        font-weight: bold;
+      }
+      .source td+td:before{
+        content: none;
+      }
+      table{
+        background: #eed;
+        border-collapse: collapse;
+        border: 1px solid #888;
+        margin: 1em;
+      }
+      table thead td{
+        background: #888;
+        color: #fff;
+        padding: .1em 1.5em;
+      }
+      table td:first-child{
+        font-weight: bold;
+        vertical-align: top;
+      }
+      table td+td:before{
+        content: "= ";
+      }
+      table td{
+        padding: 0 0 0 .6em;
+      }
+      table td+td{
+        width: 100%;
+      }
+      table tr:nth-child(2n){
+        background: #e4e4c4;
+      }
+      table tbody tr:hover td{
+        background: #ffb;
+        background: rgba(255,255,0,.3)
+      }
     </style>
   </head>
   <body>
+    <header>
     <h1>Internal Server Error (HTTP 500)</h1>
     {{ if [error_for_error] }}
       <h2>Error page for error page</h2>
@@ -97,107 +98,123 @@
       <p>An error occurred on the server during the processing of your request</p>
       <p>Here's what we know went wrong, though we still have to figure out why:</p>
     {{ endif }}
-    <h2>[exc:type]</h2>
-    <p>[exc:value]</p>
-    <h2>Traceback<small> (most recent call first)</small></h2>
-    <ol class="traceback">
-      {{ for frame in [exc:traceback] }}
-      <li>
-        <ul class="frame">
-          <li><strong>File:</strong> &quot;[frame:file]&quot;</li>
-          <li><strong>Scope:</strong> [frame:scope]</li>
+    </header>
+    <main>
+      <section id="traceback">
+        <header>
+          <h2>[exc:type]</h2>
+          <p>[exc:value]</p>
+        </header>
+        <h2>Traceback<small> (most recent call first)</small></h2>
+        <ol class="traceback">
+          {{ for frame in [exc:traceback] }}
           <li>
-            <table class="source">
-              <thead><tr><td colspan="2">Source code</td></tr></thead>
-              <tbody>
-                {{ for filename, line_no in [frame:source] }}
-                <tr><td>[filename]</td><td>[line_no]</td></tr>
-                {{ endfor }}
-              </tbody>
-            </table>
+            <ul class="frame">
+              <li><strong>File:</strong> &quot;[frame:file]&quot;</li>
+              <li><strong>Scope:</strong> [frame:scope]</li>
+              <li>
+                <table class="source">
+                  <thead><tr><td colspan="2">Source code</td></tr></thead>
+                  <tbody>
+                    {{ for filename, line_no in [frame:source] }}
+                    <tr><td>[filename]</td><td>[line_no]</td></tr>
+                    {{ endfor }}
+                  </tbody>
+                </table>
+              </li>
+              {{ if not [error_for_error] }}
+              <li>
+                <table>
+                  <thead><tr><td colspan="2">Frame locals</td></tr></thead>
+                  <tbody>
+                    {{ for name, value in [frame:locals|items|sorted] }}
+                    <tr><td>[name]</td><td title="[value|type|html]">{{ if type([value]) == str}}"[value]"{{else}}[value]{{endif}}</td></tr>
+                    {{ endfor }}
+                  </tbody>
+                </table>
+              </li>
+              {{ endif }}
+            </ul>
           </li>
-          {{ if not [error_for_error] }}
+          {{ endfor }}
+        </ol>
+      </section>
+      {{ if [error_for_error] }}
+      <section id="originalerror">
+        <header>
+          <h1>Original error (that the error page broke on)</h1>
+
+          <h2>[orig_exc:type]</h2>
+          <p>[orig_exc:value]</p>
+        </header>
+
+        <h2>Traceback<small> (most recent call first)</small></h2>
+        <ol class="traceback">
+          {{ for frame in [orig_exc:traceback] }}
           <li>
-            <table>
-              <thead><tr><td colspan="2">Frame locals</td></tr></thead>
-              <tbody>
-                {{ for name, value in [frame:locals|items|sorted] }}
-                <tr><td>[name]</td><td>[value]</td></tr>
-                {{ endfor }}
-              </tbody>
-            </table>
+            <ul class="frame">
+              <li><strong>File:</strong> &quot;[frame:file]&quot;</li>
+              <li><strong>Scope:</strong> [frame:scope]</li>
+              <li>
+                <table class="source">
+                  <thead><tr><td colspan="2">Source code</td></tr></thead>
+                  <tbody>
+                    {{ for filename, line_no in [frame:source] }}
+                    <tr><td>[filename]</td><td>[line_no]</td></tr>
+                    {{ endfor }}
+                  </tbody>
+                </table>
+              </li>
+            </ul>
           </li>
-          {{ endif }}
-        </ul>
-      </li>
-      {{ endfor }}
-    </ol>
-    {{ if [error_for_error] }}
-    <h1>Original error (that the error page broke on)</h1>
-    <h2>[orig_exc:type]</h2>
-    <p>[orig_exc:value]</p>
-    <h2>Traceback<small> (most recent call first)</small></h2>
-    <ol class="traceback">
-      {{ for frame in [orig_exc:traceback] }}
-      <li>
-        <ul class="frame">
-          <li><strong>File:</strong> &quot;[frame:file]&quot;</li>
-          <li><strong>Scope:</strong> [frame:scope]</li>
-          <li>
-            <table class="source">
-              <thead><tr><td colspan="2">Source code</td></tr></thead>
-              <tbody>
-                {{ for filename, line_no in [frame:source] }}
-                <tr><td>[filename]</td><td>[line_no]</td></tr>
-                {{ endfor }}
-              </tbody>
-            </table>
-          </li>
-        </ul>
-      </li>
-      {{ endfor }}
-    </ol>
-    {{ endif }}
-    <h2>Environment information</h2>
-    {{ if [cookies] }}
-    <table>
-      <thead><tr><td colspan="2">Cookies</td></tr></thead>
-      <tbody>
-          {{ for name, value in [cookies|items|sorted] }}
-          <tr><td>[name]</td><td>[value]</td></tr>
           {{ endfor }}
-      </tbody>
-    </table>
-    {{ endif }}
-    {{ if [query_args] }}
-    <table>
-      <thead><tr><td colspan="2">Query arguments (GET)</td></tr></thead>
-      <tbody>
-          {{ for name, value in [query_args|items|sorted] }}
-          <tr><td>[name]</td><td>[value]</td></tr>
-          {{ endfor }}
-      </tbody>
-    </table>
-    {{ endif }}
-    {{ if [post_data] }}
-    <table>
-      <thead><tr><td colspan="2">POST data</td></tr></thead>
-      <tbody>
-          {{ for name, value in [post_data|items|sorted] }}
-          <tr><td>[name]</td><td>[value]</td></tr>
-          {{ endfor }}
-      </tbody>
-    </table>
-    {{ endif }}
-    {{ if [environ] }}
-    <table>
-      <thead><tr><td colspan="2">Full environment</td></tr></thead>
-      <tbody>
-          {{ for name, value in [environ|items|sorted] }}
-          <tr><td>[name]</td><td>[value]</td></tr>
-          {{ endfor }}
-      </tbody>
-    </table>
-    {{ endif }}
+        </ol>
+      </section>
+      {{ endif }}
+
+      <section id="environment">
+        <h2>Environment information</h2>
+        {{ if [cookies] }}
+        <table>
+          <thead><tr><td colspan="2">Cookies</td></tr></thead>
+          <tbody>
+            {{ for name, value in [cookies|items|sorted] }}
+            <tr><td>[name]</td><td>[value]</td></tr>
+            {{ endfor }}
+          </tbody>
+        </table>
+        {{ endif }}
+        {{ if [query_args] }}
+        <table>
+          <thead><tr><td colspan="2">Query arguments (GET)</td></tr></thead>
+          <tbody>
+            {{ for name, value in [query_args|items|sorted] }}
+            <tr><td>[name]</td><td>[value]</td></tr>
+            {{ endfor }}
+          </tbody>
+        </table>
+        {{ endif }}
+        {{ if [post_data] }}
+        <table>
+          <thead><tr><td colspan="2">POST data</td></tr></thead>
+          <tbody>
+            {{ for name, value in [post_data|items|sorted] }}
+            <tr><td>[name]</td><td>[value]</td></tr>
+            {{ endfor }}
+          </tbody>
+        </table>
+        {{ endif }}
+        {{ if [environ] }}
+        <table>
+          <thead><tr><td colspan="2">Full environment</td></tr></thead>
+          <tbody>
+            {{ for name, value in [environ|items|sorted] }}
+            <tr><td>[name]</td><td>[value]</td></tr>
+            {{ endfor }}
+          </tbody>
+        </table>
+        {{ endif }}
+      </section>
+    </main>
   </body>
 </html>

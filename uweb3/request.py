@@ -1,29 +1,27 @@
-#!/usr/bin/python2.6
-"""uWeb3 request module."""
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""µWeb3 request module."""
 
 # Standard modules
 import cgi
 import sys
 import urllib
-from cgi import parse_qs
-try:
-  # python 2
-  import cStringIO as stringIO
-  import Cookie as cookie
-except ImportError:
-  # python 3
-  import io as stringIO
-  import http.cookies as cookie
+import io
+from urllib.parse import parse_qs, parse_qsl
+import io as stringIO
+import http.cookies as cookie
 import re
 import json
+
 # uWeb modules
 from . import response
-from werkzeug.formparser import parse_form_data
-from werkzeug.datastructures import MultiDict
 
+MAX_COOKIE_LENGTH = 4096
+MAX_REQUEST_BODY_SIZE = 20000000 #20MB
 
-class CookieToBigError(Exception):
+class CookieTooBigError(Exception):
   """Error class for cookie when size is bigger than 4096 bytes"""
+
 
 class Cookie(cookie.SimpleCookie):
   """Cookie class that uses the most specific value for a cookie name.
@@ -53,64 +51,96 @@ class Cookie(cookie.SimpleCookie):
       dict.__setitem__(self, key, morsel)
 
 
-class PostDictionary(MultiDict):
-  """ """
-  #TODO: Add basic uweb functions
-
-  def getfirst(self, key, default=None):
-    """Returns the first item out of the list from the given key
-
-    Arguments:
-      @ key: str
-      % default: any
-    """
-    items = dict(self.lists())
-    try:
-      return items[key][0]
-    except KeyError:
-      return default
-
-  def getlist(self, key):
-    """Returns a list with all values that were given for the requested key.
-
-    N.B. If the given key does not exist, an empty list is returned.
-    """
-    items = dict(self.lists())
-    try:
-      return items[key]
-    except KeyError:
-      return []
-
-class Request(object):
-  def __init__(self, env, registry):
+class Request:
+  def __init__(self, env, logger, errorlogger):
     self.env = env
     self.headers = dict(self.headers_from_env(env))
-    self.registry = registry
     self._out_headers = []
     self._out_status = 200
     self._response = None
+    self.charset = "utf-8"
     self.method = self.env['REQUEST_METHOD']
-    # `self.vars` setup, will contain keys 'cookie', 'get' and 'post'
-    self.vars = {'cookie': dict((name, value.value) for name, value in
-                                Cookie(self.env.get('HTTP_COOKIE')).items()),
-                 'get': PostDictionary(cgi.parse_qs(self.env.get('QUERY_STRING'))),
-                 'post': PostDictionary()}
-    self.env['host'] = self.headers.get('Host', '')
+    self.vars = {
+        'cookie': {
+            name: value.value
+            for name, value in Cookie(self.env.get('HTTP_COOKIE')).items()
+        },
+        'get': QueryArgsDict(parse_qs(self.env['QUERY_STRING'])),
+    }
+    self.env['host'] = self.headers.get('Host', '').strip().lower()
+    self.logger = logger
+    self.errorlogger = errorlogger
+    self.noparse = self.headers.get('accept', '').lower() == 'application/json'
 
-    if self.method == 'POST':
-      stream, form, files = parse_form_data(self.env)
-      if self.env['CONTENT_TYPE'] == 'application/json':
+    if self.method in ('POST', 'PUT', 'DELETE'):
+      request_body_size = 0
+      try:
+        request_body_size = int(self.env.get('CONTENT_LENGTH', 0))
+      except Exception:
+        pass
+      request_payload = self.env['wsgi.input'].read(min(request_body_size, MAX_REQUEST_BODY_SIZE))
+      self.input = request_payload
+      self.env['mimetype'] = self.env.get('CONTENT_TYPE', '').split(';')[0]
+
+      if self.env['mimetype'] == 'application/json':
         try:
-          request_body_size = int(self.env.get('CONTENT_LENGTH', 0))
-        except (ValueError):
-          request_body_size = 0
-        request_body = self.env['wsgi.input'].read(request_body_size)
-        data = json.loads(request_body)
-        self.vars['post'] = PostDictionary(MultiDict(data))
+          self.vars[self.method.lower()] = json.loads(request_payload)
+        except (json.JSONDecodeError, ValueError):
+          pass
+      elif self.env['mimetype'] == 'multipart/form-data':
+        boundary = self.env.get('CONTENT_TYPE', '').split(';')[1].strip().split('=')[1]
+        request_payload = request_payload.split(b'--%s' % boundary.encode(self.charset))
+        self.vars['files'] = {}
+        fields = []
+        for item in request_payload:
+          item = item.lstrip()
+          if item.startswith(b'Content-Disposition: form-data'):
+            nl = 0
+            prevnl = 0
+            itemlength = len(item)
+            name = filename = ContentType = charset = None
+            while nl < itemlength:
+              nl = item.index(b"\n", prevnl+len(b"\n"))
+              header = item[prevnl:nl]
+              prevnl = nl
+              if not header.strip():
+                content = item[nl:].strip()
+                break
+              directives = header.strip().split(b';')
+              for directive in directives:
+                directive = directive.lstrip()
+                if directive.startswith(b'name='):
+                  name = directive.split(b'=', 1)[1][1:-1].decode(self.charset)
+                  if name == '_charset_': # default charset default case
+                    self.charset = item[nl:].strip()
+                    break
+                if directive.startswith(b'filename='):
+                  filename = directive.split(b'=', 1)[1][1:-1].decode(self.charset)
+                if directive.startswith(b'Content-Type='):
+                  ContentType = directive.split(b'=', 1)[1].decode(self.charset).split(";")
+                  if len(ContentType) > 1:
+                    if ContentType[1].startswith('charset'):
+                      charset = ContentType[1].split('=')[1]
+                    if ContentType[0].startswith('content-type'):
+                      contenttype = ContentType[0].split(':')[1].strip()
+            if charset:
+              content = content.decode(charset)
+            elif not ContentType:
+              try:
+                content = content.decode(charset or self.charset)
+              except:
+                pass
+            if filename:
+              self.vars['files'][name] = {'filename': filename,
+                                          'ContentType': ContentType,
+                                          'content': content}
+            else:
+              fields.append('%s=%s' % (name, content))
+        self.vars[self.method.lower()] = IndexedFieldStorage(stringIO.StringIO('&'.join(fields)),
+             environ={'REQUEST_METHOD': 'POST'})
       else:
-        self.vars['post'] = PostDictionary(form)
-        for f in files:
-          self.vars['post'][f] = files.get(f)
+        self.vars[self.method.lower()] = IndexedFieldStorage(stringIO.StringIO(request_payload.decode(self.charset)),
+             environ={'REQUEST_METHOD': 'POST'})
 
   @property
   def path(self):
@@ -119,13 +149,13 @@ class Request(object):
   @property
   def response(self):
     if self._response is None:
-      self._response = response.Response()
+      self._response = response.Response(headers=self._out_headers)
     return self._response
 
-  def Redirect(self, location, http_code=307):
+  def Redirect(self, location, httpcode=307):
     REDIRECT_PAGE = ('<!DOCTYPE html><html><head><title>Page moved</title></head>'
-                   '<body>Page moved, please follow <a href="{}">this link</a>'
-                   '</body></html>').format(location)
+                     '<body>Page moved, please follow <a href="{}">this link</a>'
+                     '</body></html>').format(location)
 
     headers = {'Location': location}
     if self.response.headers.get('Set-Cookie'):
@@ -133,7 +163,7 @@ class Request(object):
     return response.Response(
       content=REDIRECT_PAGE,
       content_type=self.response.headers.get('Content-Type', 'text/html'),
-      httpcode=http_code,
+      httpcode=httpcode,
       headers=headers
       )
 
@@ -172,14 +202,18 @@ class Request(object):
         When True, the cookie is only used for http(s) requests, and is not
         accessible through Javascript (DOM).
     """
-    if isinstance(value, (str)):
-      if len(value.encode('utf-8')) >= 4096:
-        raise CookieToBigError("Cookie is larger than 4096 bytes and wont be set")
+    if isinstance(value, (str)) and len(value.encode('utf-8')) >= MAX_COOKIE_LENGTH:
+      raise CookieTooBigError("Cookie is larger than %d bytes and wont be set" % MAX_COOKIE_LENGTH)
 
     new_cookie = Cookie({key: value})
     if 'max_age' in attrs:
       attrs['max-age'] = attrs.pop('max_age')
     new_cookie[key].update(attrs)
+    if 'samesite' not in attrs and 'secure' not in attrs:
+      try: # only supported from python 3.8 and up
+        attrs['samesite'] = 'Lax' # set default to LAX for no secure (eg, local) sessions.
+      except http.cookies.CookieError:
+        pass
     self.AddHeader('Set-Cookie', new_cookie[key].OutputString())
 
   def AddHeader(self, name, value):
@@ -188,6 +222,8 @@ class Request(object):
         self.response.headers['Set-Cookie'] = [value]
         return
       self.response.headers['Set-Cookie'].append(value)
+      return
+    self.response.AddHeader(name, value)
 
   def DeleteCookie(self, name):
     """Deletes cookie by name
@@ -221,9 +257,9 @@ class IndexedFieldStorage(cgi.FieldStorage):
   def read_urlencoded(self):
     indexed = {}
     self.list = []
-    for field, value in cgi.parse_qsl(self.fp.read(self.length),
-                                      self.keep_blank_values,
-                                      self.strict_parsing):
+    for field, value in parse_qsl(self.fp.read(self.length),
+                                  self.keep_blank_values,
+                                  self.strict_parsing):
       if self.FIELD_AS_ARRAY.match(str(field)):
         field_group, field_key = self.FIELD_AS_ARRAY.match(field).groups()
         indexed.setdefault(field_group, cgi.MiniFieldStorage(field_group, {}))
@@ -233,38 +269,41 @@ class IndexedFieldStorage(cgi.FieldStorage):
     self.list = list(indexed.values()) + self.list
     self.skip_lines()
 
+  def __repr__(self):
+    return "{%s}" % ','.join("'%s': '%s'" % (k, v if len(v) > 1 else v[0]) for k, v in self.iteritems())
 
-class CustomByteLikeObject(object):
-  def __init__(self, data):
-    self.data = data
+  @property
+  def __dict__(self):
+    return {
+        key: value if len(value) > 1 else value[0]
+        for key, value in self.iteritems()
+    }
 
-  def read(self, length=None):
-    if length:
-      return self.data[0:length]
-    else:
-      return self.data
 
-  def readline(self, *args):
-    return self.data
+class QueryArgsDict(dict):
+  def getfirst(self, key, default=None):
+    """Returns the first value for the requested key, or a fallback value."""
+    try:
+      return self[key][0]
+    except KeyError:
+      return default
 
-def ParseForm(file_handle, environ, json=False):
-  """Returns an IndexedFieldStorage object from the POST data and environment.
+  def getlist(self, key):
+    """Returns a list with all values that were given for the requested key.
 
-  This small wrapper is necessary because cgi.FieldStorage assumes that the
-  provided file handles supports .readline() iteration. File handles as provided
-  by BaseHTTPServer do not support this, so we need to convert them to proper
-  stringIO objects first.
+    N.B. If the given key does not exist, an empty list is returned.
+    """
+    try:
+      return self[key]
+    except KeyError:
+      return []
+
+
+def return_real_remote_addr(env):
+  """Returns the remote ip-address,
+  if there is a proxy involved it will take the last IP addres from the HTTP_X_FORWARDED_FOR list
   """
-  #TODO see if we need to encode in utf8 or is ascii is fine based on the headers
-  # print(file_handle.read(int(environ['CONTENT_LENGTH'])).decode('ascii'))
-  # data = sys.stdin.read()
-  if json:
-    #We already decoded the JSON and turned into a urlquerystring
-    environ['CONTENT_TYPE'] = 'application/x-www-form-urlencoded'
-    files = CustomByteLikeObject(file_handle.encode())
-  else:
-    files = CustomByteLikeObject(file_handle.read(int(environ['CONTENT_LENGTH'])))
-
-  return IndexedFieldStorage(fp=files, environ=environ, keep_blank_values=1)
-
-
+  try:
+    return env['HTTP_X_FORWARDED_FOR'].split(',')[-1].strip()
+  except KeyError:
+    return env['REMOTE_ADDR']

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Your session has timed our. µWeb3 403 Error.</title>
+    <meta charset="UTF-8">
+    <style type="text/css">
+      html{
+        font: 1em/1.2em monospace;
+      }
+      p{
+        margin: 0.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Error, your session has timed out (HTTP 403)</h1>
+    </header>
+    <main>
+      <section>
+        {{if [error] }}
+          <p>[error]</p>
+        {{ endif }}
+      </section>
+    </main>
+  </body>
+</html>

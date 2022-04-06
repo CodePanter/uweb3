@@ -1,30 +1,34 @@
-from uweb3.model import NotExistError
-from sqlalchemy import Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base, declared_attr
-from sqlalchemy.orm import sessionmaker, reconstructor
-from sqlalchemy.orm.session import object_session
-from sqlalchemy.inspection import inspect
 from itertools import chain
 
-class AlchemyBaseRecord(object):
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base, declared_attr
+from sqlalchemy.inspection import inspect
+from sqlalchemy.orm import reconstructor, sessionmaker
+from sqlalchemy.orm.session import object_session
+
+from uweb3.model import NotExistError
+
+
+class AlchemyBaseRecord:
   def __init__(self, session, record):
     self.session = session
     self._BuildClassFromRecord(record)
 
   def _BuildClassFromRecord(self, record):
-    if isinstance(record, dict):
-      for key, value in record.items():
-        if not key in self.__table__.columns.keys():
-          raise AttributeError(f"Key '{key}' not specified in class '{self.__class__.__name__}'")
-        setattr(self, key, value)
-      if self.session:
-        try:
-          self.session.add(self)
-        except:
-          self.session.rollback()
-          raise
-        else:
-          self.session.commit()
+    if not isinstance(record, dict):
+      return
+    for key, value in record.items():
+      if key not in self.__table__.columns.keys():
+        raise AttributeError(f"Key '{key}' not specified in class '{self.__class__.__name__}'")
+      setattr(self, key, value)
+    if self.session:
+      try:
+        self.session.add(self)
+      except:
+        self.session.rollback()
+        raise
+      else:
+        self.session.commit()
 
   def __hash__(self):
     """Returns the hashed value of the key."""
@@ -68,7 +72,10 @@ class AlchemyBaseRecord(object):
     return not self == other
 
   def __len__(self):
-    return len(dict((col, getattr(self, col)) for col in self.__table__.columns.keys() if getattr(self, col)))
+    return len({
+        col: getattr(self, col)
+        for col in self.__table__.columns.keys() if getattr(self, col)
+    })
 
   def __int__(self):
     """Returns the integer key value of the Record.
@@ -177,7 +184,7 @@ class AlchemyBaseRecord(object):
       None: when record is empty
     """
     if not isinstance(record, type(None)):
-      return dict((col, getattr(record, col)) for col in record.__table__.columns.keys())
+      return {col: getattr(record, col) for col in record.__table__.columns.keys()}
     return None
 
   @reconstructor
@@ -194,6 +201,159 @@ class AlchemyBaseRecord(object):
         Class that you want to know the primary key name from
     """
     return getattr(cls, inspect(cls).primary_key[0].name)
+
+class AlchemyRecord(AlchemyBaseRecord):
+  """ """
+  @classmethod
+  def FromPrimary(cls, session, p_key):
+    """Finds record based on given class and supplied primary key.
+
+    Arguments:
+      @ session: sqlalchemy session object
+        Available in the pagemaker with self.session
+      @ p_key: integer
+        primary_key of the object to delete
+    Returns
+      cls
+      None
+    """
+    try:
+      record = session.query(cls).filter(cls._PrimaryKeyCondition(cls) == p_key).first()
+    except:
+      session.rollback()
+      raise
+    else:
+      if not record:
+        raise NotExistError(f"Record with primary key {p_key} does not exist")
+      return record
+
+  @classmethod
+  def DeletePrimary(cls, session, p_key):
+    """Deletes record base on primary key from given class.
+
+    Arguments:
+      @ session: sqlalchemy session object
+        Available in the pagemaker with self.session
+      @ p_key: integer
+        primary_key of the object to delete
+
+    Returns:
+      isdeleted: boolean
+    """
+    try:
+      isdeleted = session.query(cls).filter(cls._PrimaryKeyCondition(cls) == p_key).delete()
+    except:
+      session.rollback()
+      raise
+    else:
+      session.commit()
+      return isdeleted
+
+  @classmethod
+  def Create(cls, session, record):
+    """Creates a new instance and commits it to the database
+
+    Arguments:
+      @ session: sqlalchemy session object
+        Available in the pagemaker with self.session
+      @ record: dict
+        Dictionary with all key:value pairs that are required for the db record
+    Returns:
+      cls
+    """
+    return cls(session, record)
+
+  @classmethod
+  def List(cls, session, conditions=None, limit=None, offset=None,
+           order=None, yield_unlimited_total_first=False):
+    """Yields a Record object for every table entry.
+
+    Arguments:
+      @ session: sqlalchemy session object
+        Available in the pagemaker with self.session
+      % conditions: list
+        Optional query portion that will be used to limit the list of results.
+        If multiple conditions are provided, they are joined on an 'AND' string.
+        For example: conditions=[User.id <= 10, User.id >=]
+      % limit: int ~~ None
+        Specifies a maximum number of items to be yielded. The limit happens on
+        the database side, limiting the query results.
+      % offset: int ~~ None
+        Specifies the offset at which the yielded items should start. Combined
+        with limit this enables proper pagination.
+      % order: tuple of operants
+        For example the User class has 3 fields; id, username, password. We can pass
+        the field we want to order on to the tuple like so;
+        (User.id.asc(), User.username.desc())
+      % yield_unlimited_total_first: bool ~~ False
+        Instead of yielding only Record objects, the first item returned is the
+        number of results from the query if it had been executed without limit.
+
+    Returns:
+      integer: integer with length of results.
+      list: List of classes from request type
+    """
+    try:
+      query = session.query(cls)
+      if conditions:
+        for condition in conditions:
+          query = query.filter(condition)
+      if order:
+        for item in order:
+          query = query.order_by(item)
+      if limit:
+        query = query.limit(limit)
+      if offset:
+        query = query.offset(offset)
+      result = query.all()
+    except:
+      session.rollback()
+      raise
+    else:
+      if yield_unlimited_total_first:
+        return len(result)
+      return result
+
+  @classmethod
+  def Update(cls, session, conditions, values):
+    """Update table based on conditions.
+
+    Arguments:
+      @ session: sqlalchemy session object
+          Available in the pagemaker with self.session
+      @ conditions: list|tuple
+        for example: [User.id > 2, User.id < 100]
+      @ values: dict
+        for example: {User.username: 'value'}
+    """
+    try:
+      query = session.query(cls)
+      for condition in conditions:
+        query = query.filter(condition)
+      query = query.update(values)
+    except:
+      session.rollback()
+      raise
+    else:
+      session.commit()
+
+  def Delete(self):
+    """Delete current instance from the database"""
+    try:
+      isdeleted = self.session.query(type(self)).filter(self._PrimaryKeyCondition(self) == self.key).delete()
+    except:
+      self.session.rollback()
+      raise
+    else:
+      self.session.commit()
+      return isdeleted
+
+  def Save(self):
+    """Saves any changes made in the current record. Sqlalchemy automatically detects
+    these changes and only updates the changed values. If no values are present
+    no query will be commited."""
+    self.session.commit()
+
 
 class AlchemyRecord(AlchemyBaseRecord):
   """ """

@@ -25,6 +25,7 @@ pip-log.txt
 .coverage
 .tox
 nosetests.xml
+.noseids
 
 # Translations
 *.mo
@@ -34,3 +35,4 @@ features
 *.vscode
 *.log
 *.out
+scaffold/
